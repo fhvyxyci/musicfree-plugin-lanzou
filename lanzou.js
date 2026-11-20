@@ -68,14 +68,17 @@ const FOLDER_PREFIX = 'folder:';
 
 // 单次方法调用沙箱限时 10 秒，这里留给每个动作的预算
 const REQUEST_TIMEOUT = 8000;
-const CRAWL_BUDGET_MS = 4200; // 普通场景下一次调用用来爬索引的时间
-const CRAWL_BUDGET_FIRST_MS = 7000; // 索引还是空的时候多给一点
+// 单次方法调用的总时间预算。沙箱整体限时 10 秒，这里留足余量：
+// 手机端冷启动要「登录 + 建索引」，不留余量就会整段超时，界面表现为「加载失败」。
+const METHOD_BUDGET_MS = 7000;
+const CRAWL_BUDGET_MS = 4000; // 普通场景下一次调用用来爬索引的时间
+const CRAWL_BUDGET_FIRST_MS = 6500; // 索引还是空的时候多给一点
 
 const PAGE_SIZE = 30; // 搜索结果每页
 const SHEET_PAGE_SIZE = 30; // 歌单 / 专辑每页
 const LIST_PAGE_SIZE = 50; // 榜单 / 歌单详情每页
 
-const MIN_REQUEST_INTERVAL = 260; // 请求最小间隔，避免触发限流
+const MIN_REQUEST_INTERVAL = 100; // 请求最小间隔（实测蓝奏云能承受更快的顺序请求；限流由 zt=4 退避兜底）
 const MAX_RETRY = 3;
 const DIRECT_URL_TTL = 5 * 60 * 1000; // 直链缓存 5 分钟（蓝奏云直链时间短）
 
@@ -121,6 +124,26 @@ function sleep(ms) {
   return new Promise(function (r) {
     setTimeout(r, ms);
   });
+}
+
+// 单次方法调用的截止时间：任何一步都要在它之前收手，保证方法能正常返回
+let methodDeadline = 0;
+
+function beginMethod() {
+  methodDeadline = Date.now() + METHOD_BUDGET_MS;
+}
+
+function remainingMs() {
+  if (!methodDeadline) return METHOD_BUDGET_MS;
+  return methodDeadline - Date.now();
+}
+
+// 单个请求的超时也不能超过本次方法的剩余时间
+function requestTimeout() {
+  if (!methodDeadline) return REQUEST_TIMEOUT;
+  const left = remainingMs();
+  if (left < 1500) return 1500;
+  return Math.min(REQUEST_TIMEOUT, left);
 }
 
 // 全局节流：所有发往蓝奏云的请求排队，避免并发把限流打死
@@ -345,6 +368,24 @@ function cookieHeaderString(extra) {
  *   - 新版 axios：headers.getSetCookie() / headers.get('set-cookie')
  *   - RN/Hermes：可能整个头都读不到（见下面 requireCookieFallback 的提示）
  */
+/**
+ * 把一条可能塞了多个 cookie 的 Set-Cookie 头拆开。
+ *
+ * 不同运行环境给的形态不一样：
+ *   - Node / Electron：headers['set-cookie'] 是数组，一条一个 cookie
+ *   - RN / 移动端 XHR：多条会被拼成一个字符串（或数组里只有一个元素但内容是拼接的）
+ * 只按 `,` 拆会把 `Expires=Wed, 21 Oct 2015 ...` 拆断，
+ * 所以只在「逗号后面紧跟 name=」的位置拆。
+ */
+function splitCookieChunks(raw) {
+  return String(raw || '')
+    .split(/,(?=\s*[^;,=\s]+=)/)
+    .map(function (x) {
+      return x.trim();
+    })
+    .filter(Boolean);
+}
+
 function extractSetCookies(res) {
   const out = [];
   const h = res && res.headers;
@@ -360,9 +401,14 @@ function extractSetCookies(res) {
   }
   if (!raw && typeof h === 'object') raw = h['set-cookie'] || h['Set-Cookie'];
   if (!raw) return out;
-  if (typeof raw === 'string') out.push(raw);
-  else if (raw && typeof raw.length === 'number') {
-    for (let i = 0; i < raw.length; i++) out.push(String(raw[i]));
+  if (typeof raw === 'string') {
+    return splitCookieChunks(raw);
+  }
+  if (raw && typeof raw.length === 'number') {
+    for (let i = 0; i < raw.length; i++) {
+      const chunks = splitCookieChunks(raw[i]);
+      for (let j = 0; j < chunks.length; j++) out.push(chunks[j]);
+    }
   }
   return out;
 }
@@ -408,7 +454,7 @@ async function httpRequest(method, url, opts) {
       method: method,
       url: url,
       headers: headers,
-      timeout: REQUEST_TIMEOUT,
+      timeout: requestTimeout(),
       validateStatus: function () {
         return true;
       },
@@ -928,8 +974,11 @@ async function getIndex(budget) {
   const rootId = vars.rootFolder || '-1';
   const existing = await loadIndex(fp, rootId);
   if (existing.done) return existing;
-  const ms = existing.songs.length === 0 ? CRAWL_BUDGET_FIRST_MS : (budget || CRAWL_BUDGET_MS);
-  return crawlStep(fp, ms, rootId);
+  const want = existing.songs.length === 0 ? CRAWL_BUDGET_FIRST_MS : (budget || CRAWL_BUDGET_MS);
+  // 留给收尾的时间不够就别再起新请求，直接返回当前进度
+  const left = remainingMs() - 500;
+  if (left < 700) return existing;
+  return crawlStep(fp, Math.min(want, left), rootId);
 }
 
 // 含音频的文件夹（歌单 / 专辑 / 目录榜单都用它）
@@ -1507,6 +1556,7 @@ async function findLyricFile(musicItem) {
 /* ============================ 插件方法 ============================ */
 
 async function search(query, page, type) {
+  beginMethod();
   const currentPage = page > 0 ? page : 1;
   const q = cleanQuery(query).toLowerCase();
 
@@ -1531,18 +1581,26 @@ async function search(query, page, type) {
     return { isEnd: true, data: [] };
   }
 
-  const state = await getIndex(q ? CRAWL_BUDGET_MS : CRAWL_BUDGET_FIRST_MS);
-  const matched = !q
-    ? state.songs
-    : state.songs.filter(function (s) {
-        if (String(s.n).toLowerCase().indexOf(q) >= 0) return true;
-        const p = parseFileName(s.n);
-        if (String(p.title).toLowerCase().indexOf(q) >= 0) return true;
-        if (String(p.artist).toLowerCase().indexOf(q) >= 0) return true;
-        const folder = state.folders[s.f];
-        if (folder && String(folder.name).toLowerCase().indexOf(q) >= 0) return true;
-        return false;
-      });
+  let state = await getIndex(q ? CRAWL_BUDGET_MS : CRAWL_BUDGET_FIRST_MS);
+  let matched = matchSongs(state, q);
+
+  /**
+   * 索引还没建完又一条没命中时，继续往下扫直到命中或者时间用完。
+   * 必须这么做的原因：首页返回 0 条时列表没有内容可滚，
+   * 用户没法靠「往下拉」触发翻页，观感就是「搜不到」。
+   */
+  if (q && !matched.length && !state.done) {
+    const vars = syncVars();
+    const fp = configFingerprint(vars);
+    const rootId = vars.rootFolder || '-1';
+    for (let guard = 0; guard < 12; guard++) {
+      const left = remainingMs() - 600;
+      if (left < 900) break;
+      state = await crawlStep(fp, Math.min(1800, left), rootId);
+      matched = matchSongs(state, q);
+      if (matched.length || state.done) break;
+    }
+  }
 
   const start = (currentPage - 1) * PAGE_SIZE;
   const data = matched.slice(start, start + PAGE_SIZE).map(function (s) {
@@ -1551,6 +1609,20 @@ async function search(query, page, type) {
   // 索引还没扫完时 isEnd 给 false，让用户继续往下拉，翻页会接着扫
   const isEnd = state.done ? matched.length <= start + PAGE_SIZE : false;
   return { isEnd: isEnd, data: data };
+}
+
+// 关键词匹配：文件名、解析出的标题/歌手、所在目录名
+function matchSongs(state, q) {
+  if (!q) return state.songs;
+  return state.songs.filter(function (s) {
+    if (String(s.n).toLowerCase().indexOf(q) >= 0) return true;
+    const p = parseFileName(s.n);
+    if (String(p.title).toLowerCase().indexOf(q) >= 0) return true;
+    if (String(p.artist).toLowerCase().indexOf(q) >= 0) return true;
+    const folder = state.folders[s.f];
+    if (folder && String(folder.name).toLowerCase().indexOf(q) >= 0) return true;
+    return false;
+  });
 }
 
 function toFolderSheetItem(f, kind) {
@@ -1614,6 +1686,7 @@ async function listFolderSongs(folderId, page) {
 }
 
 async function getMusicSheetInfo(sheetItem, page) {
+  beginMethod();
   const folderId = sheetItem && sheetItem.folderId;
   if (!folderId) throw new Error('歌单信息缺少目录标识');
   const r = await listFolderSongs(String(folderId), page);
@@ -1635,6 +1708,7 @@ async function getAlbumInfo(albumItem, page) {
 }
 
 async function getTopLists() {
+  beginMethod();
   const state = await getIndex(CRAWL_BUDGET_MS);
   const folders = folderList(state);
   const dirGroup = folders.map(function (f) {
@@ -1658,6 +1732,7 @@ async function getTopLists() {
 }
 
 async function getTopListDetail(topListItem, page) {
+  beginMethod();
   const id = topListItem && topListItem.id;
   const currentPage = page > 0 ? page : 1;
 
@@ -1682,6 +1757,7 @@ async function getTopListDetail(topListItem, page) {
 }
 
 async function getRecommendSheetTags() {
+  beginMethod();
   return {
     pinned: [{ id: ALL_FOLDERS_TAG, title: '全部文件夹' }],
     data: [],
@@ -1689,6 +1765,7 @@ async function getRecommendSheetTags() {
 }
 
 async function getRecommendSheetsByTag(tag, page) {
+  beginMethod();
   const currentPage = page > 0 ? page : 1;
   const state = await getIndex(CRAWL_BUDGET_MS);
   const folders = folderList(state);
@@ -1702,6 +1779,7 @@ async function getRecommendSheetsByTag(tag, page) {
 }
 
 async function getMediaSource(musicItem, quality) {
+  beginMethod();
   const url = await resolveDirectUrl(String(musicItem.id));
   return {
     url: url,
@@ -1711,6 +1789,7 @@ async function getMediaSource(musicItem, quality) {
 }
 
 async function getMusicInfo(musicItem) {
+  beginMethod();
   try {
     const tags = await fetchTags(musicItem);
     const out = {};
@@ -1728,6 +1807,7 @@ async function getMusicInfo(musicItem) {
 }
 
 async function getLyric(musicItem) {
+  beginMethod();
   if (!musicItem || !musicItem.folderId) return {};
   let hit = null;
   try {
@@ -1757,7 +1837,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.1',
+  version: '0.0.2',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
