@@ -122,7 +122,8 @@ function cleanQuery(q) {
 
 function sleep(ms) {
   return new Promise(function (r) {
-    setTimeout(r, ms);
+    if (typeof setTimeout === 'function') setTimeout(r, ms);
+    else r();
   });
 }
 
@@ -164,6 +165,13 @@ function formEncode(obj) {
     parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(obj[k])).replace(/%20/g, '+'));
   }
   return parts.join('&');
+}
+
+// 当前正在做的事，出错时用来告诉用户卡在哪一步
+let lastStage = '初始化';
+
+function setStage(s) {
+  lastStage = s;
 }
 
 function errText(e) {
@@ -429,7 +437,8 @@ function absorbCookies(res) {
 // 统一的底层请求：自动处理 acw_sc__v2 挑战
 async function httpRequest(method, url, opts) {
   opts = opts || {};
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const MAX_CHALLENGE = 4;
+  for (let attempt = 0; attempt < MAX_CHALLENGE; attempt++) {
     await pace();
     const headers = {
       'User-Agent': UA,
@@ -506,7 +515,8 @@ async function doLogin(vars) {
   try {
     data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
   } catch (e) {
-    throw new Error('登录失败：返回内容无法解析');
+    const peek = String(res.data == null ? '' : res.data).replace(/\s+/g, ' ').slice(0, 80);
+    throw new Error('登录失败：返回内容不是 JSON（' + (peek || '空响应') + '）');
   }
   if (!data || Number(data.zt) !== 1) {
     const info = data && (data.info || data.inf);
@@ -574,6 +584,7 @@ function parseCookieString(str) {
  *   3. 都没有 -> 用账号密码登录；若用户填了 Cookie，则直接用 Cookie
  */
 async function ensureSession(force) {
+  setStage('登录');
   if (session.ok && !force) return session;
   if (loginPromise) return loginPromise;
   loginPromise = (async function () {
@@ -624,6 +635,7 @@ async function ensureSession(force) {
 
 // 用现有 Cookie 去会话页取 uid / vei，顺便验证 Cookie 是否还有效
 async function refreshUidVei() {
+  setStage('读取会话');
   const disk = await httpRequest('GET', MYDISK_URL);
   const html = typeof disk.data === 'string' ? disk.data : '';
   const uidMatch = html.match(/uid=([^'"&;\s]+)/);
@@ -695,6 +707,7 @@ async function doupload(form, allowRelogin) {
 
 // 列某个目录下的子文件夹
 async function apiListFolders(folderId) {
+  setStage('读取目录');
   const d = await doupload({ task: '47', folder_id: String(folderId) });
   const arr = d.text;
   if (!arr || typeof arr.length !== 'number') return [];
@@ -709,6 +722,7 @@ async function apiListFolders(folderId) {
 
 // 列某个目录下的一页文件（pg 从 1 开始，空数组表示到底）
 async function apiListFiles(folderId, pg) {
+  setStage('读取文件列表');
   const d = await doupload({ task: '5', folder_id: String(folderId), pg: String(pg) });
   const arr = d.text;
   if (!arr || typeof arr.length !== 'number') return [];
@@ -1034,6 +1048,7 @@ function readJsVar(html, key) {
  * 中间任何一跳都可能再次弹出 acw_sc__v2 挑战，由 httpRequest 统一处理。
  */
 async function resolveDirectUrl(fileId) {
+  setStage('获取播放地址');
   const hit = cache.direct[fileId];
   if (hit && Date.now() - hit.at < DIRECT_URL_TTL) return hit.url;
 
@@ -1555,7 +1570,7 @@ async function findLyricFile(musicItem) {
 
 /* ============================ 插件方法 ============================ */
 
-async function search(query, page, type) {
+async function searchImpl(query, page, type) {
   beginMethod();
   const currentPage = page > 0 ? page : 1;
   const q = cleanQuery(query).toLowerCase();
@@ -1609,6 +1624,32 @@ async function search(query, page, type) {
   // 索引还没扫完时 isEnd 给 false，让用户继续往下拉，翻页会接着扫
   const isEnd = state.done ? matched.length <= start + PAGE_SIZE : false;
   return { isEnd: isEnd, data: data };
+}
+
+/**
+ * 搜索失败时把错误当成一条「结果」显示出来。
+ *
+ * 手机端插件跑在沙箱里，报错只进 App 的日志，用户看不到原因，
+ * 界面只会显示「加载失败」。这里把出错阶段和错误原文塞进一条结果，
+ * 用户截图就能定位，比一片空白有用。
+ */
+function errorItem(stage, e) {
+  const msg = String((e && e.message) || e || '未知错误').replace(/\s+/g, ' ').slice(0, 100);
+  return {
+    id: '__diag__',
+    title: '蓝奏云出错（' + stage + '）：' + msg,
+    artist: '把这一行告诉插件作者',
+    album: 'v0.0.3 诊断行',
+  };
+}
+
+async function search(query, page, type) {
+  try {
+    return await searchImpl(query, page, type);
+  } catch (e) {
+    console.warn('[蓝奏云] 搜索失败：' + errText(e));
+    return { isEnd: true, data: [errorItem(lastStage, e)] };
+  }
 }
 
 // 关键词匹配：文件名、解析出的标题/歌手、所在目录名
@@ -1780,6 +1821,9 @@ async function getRecommendSheetsByTag(tag, page) {
 
 async function getMediaSource(musicItem, quality) {
   beginMethod();
+  if (String(musicItem && musicItem.id) === '__diag__') {
+    throw new Error('这是错误提示行，不是歌曲');
+  }
   const url = await resolveDirectUrl(String(musicItem.id));
   return {
     url: url,
@@ -1837,7 +1881,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.2',
+  version: '0.0.3',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
