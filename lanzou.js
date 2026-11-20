@@ -1635,11 +1635,20 @@ async function searchImpl(query, page, type) {
  */
 function errorItem(stage, e) {
   const msg = String((e && e.message) || e || '未知错误').replace(/\s+/g, ' ').slice(0, 100);
+  // 把运行环境也带上：App 版本太旧同样会导致插件跑不起来
+  let envInfo = '';
+  try {
+    const os = typeof env !== 'undefined' && env && env.os ? env.os : '?';
+    const ver = typeof env !== 'undefined' && env && env.appVersion ? env.appVersion : '?';
+    envInfo = os + ' / App ' + ver;
+  } catch (e2) {
+    envInfo = '';
+  }
   return {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）：' + msg,
-    artist: '把这一行告诉插件作者',
-    album: 'v0.0.3 诊断行',
+    artist: '把这一行发给插件作者',
+    album: 'v0.0.4 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -1881,7 +1890,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.3',
+  version: '0.0.4',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
