@@ -121,7 +121,7 @@ https://fhvyxyci.github.io/musicfree-plugin-lanzou/lanzou.js
 
 | 项目 | 实测结果 |
 | --- | --- |
-| 登录 | `POST up.woozooo.com/mlogin.php`，表单 `task=3&uid=&pwd=`，返回 `{"zt":1,"info":"成功登录"}` |
+| 登录 | `POST pc.woozooo.com/mlogin.php`（优先）或 `up.woozooo.com/mlogin.php`，表单 `task=3&uid=&pwd=`，返回 `{"zt":1,"info":"成功登录"}` |
 | 反爬 | 登录页 / 分享页 / 直链页会返回 `acw_sc__v2` JS 挑战页，算法是 `unbox + 定长掩码异或`，纯字符串运算即可，无需 crypto |
 | 鉴权 | 真正起作用的是 `phpdisk_info` cookie，**只带 PHPSESSID 会返回 `zt=9 login not`** |
 | 会话号 | 客户端自带 `PHPSESSID` 时服务端会沿用，便于在读不到 Set-Cookie 的环境里保持会话可控 |
@@ -167,15 +167,16 @@ https://fhvyxyci.github.io/musicfree-plugin-lanzou/lanzou.js
 
 ## 已知限制
 
-- **部分手机网络过不了蓝奏云的反爬**。蓝奏云在部分出口 IP 上会下发 `acw_sc__v2` 挑战页，正常浏览器执行页面里的混淆脚本就能通过；插件是纯字符串运算复刻这套算法（和 OpenList 驱动一致），在多数网络下可用，但**如果服务端给你下发了不同版本的挑战，纯 JS 沙箱里没有浏览器环境去执行它的脚本，这条路过不去**。症状是会看到「反爬校验重试超限」。
-  - 可以先换个网络试试（Wi‑Fi ↔ 移动数据），出口 IP 变了结果常常就变了
-  - 仍然不行的话，改用电脑端的 MusicFree
+- **反爬挑战在个别客户端上过不去**。蓝奏云会对部分客户端下发 `acw_sc__v2` 挑战页，`acw_tc` 这类配套 cookie 由服务端随挑战页一起下发；如果某个运行环境（部分 React Native 版本）**不暴露 Set-Cookie**，插件就拿不到配套 cookie，纯 JS 沙箱里又没有浏览器环境去执行它那段混淆脚本，这条路就过不去。症状是「反爬校验重试超限」。
+  - 插件已把登录改到**不弹挑战的 `pc.woozooo.com/mlogin.php`**，日常使用基本不会碰到这个问题
+  - 万一碰到，报错末尾会直接写「本环境从未返回 Set-Cookie」，看到这句就说明是运行环境的限制，不是账号问题
+  - 兜底办法：填 Cookie 模式（在电脑浏览器登录后复制整行），或改用电脑端 MusicFree
 - 蓝奏云会更换 CDN 域名，个别时段某个域名会解析失败，稍等重试即可
 
 ## 原理
 
 ```
-登录  up.woozooo.com/mlogin.php
+登录  pc.woozooo.com/mlogin.php（被挡时退回 up.woozooo.com）
   │  (acw_sc__v2 挑战 → 算出 cookie → 重发)
   ├─→ phpdisk_info 会话  ──→ 落盘 lanzou.session.v1
   │

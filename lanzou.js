@@ -49,7 +49,18 @@ const axios = require('axios');
 // 网页版接口根地址（文件操作）
 const API_BASE = 'https://pc.woozooo.com';
 // 登录接口
-const LOGIN_URL = 'https://up.woozooo.com/mlogin.php';
+/**
+ * 登录入口，按顺序尝试。
+ *
+ * 两个地址是同一套程序的不同 vhost，但**反爬策略不同**：
+ *   - pc.woozooo.com/mlogin.php 实测直接返回 JSON，不弹 acw_sc__v2 挑战
+ *   - up.woozooo.com/mlogin.php 是 OpenList 驱动用的那个，经常被挑战
+ * 所以优先走 pc，被挡住再退回 up。
+ */
+const LOGIN_URLS = [
+  'https://pc.woozooo.com/mlogin.php',
+  'https://up.woozooo.com/mlogin.php',
+];
 // 会话信息页（从中取 uid / vei）
 const MYDISK_URL = API_BASE + '/mydisk.php?item=files&action=index';
 // 分享页默认域名（真实域名以 task=22 返回的 is_newd 为准，不退化成硬编码）
@@ -424,6 +435,7 @@ function extractSetCookies(res) {
 
 function absorbCookies(res) {
   const list = extractSetCookies(res);
+  if (list.length) diagStats.setCookieResponses++;
   for (let i = 0; i < list.length; i++) {
     const kv = String(list[i]).split(';')[0];
     const eq = kv.indexOf('=');
@@ -487,6 +499,7 @@ async function httpRequest(method, url, opts) {
 
     const text = typeof res.data === 'string' ? res.data : '';
     if (isAcwChallenge(text)) {
+      diagStats.challenges++;
       const v = calcAcwScV2(text);
       const arg = String(text).match(/arg1='([^']*)'/);
       const argLen = arg ? arg[1].length : 0;
@@ -501,12 +514,17 @@ async function httpRequest(method, url, opts) {
     return res;
   }
   const ckNames = Object.keys(session.cookies);
+  // 一次 Set-Cookie 都没拿到过 → 挑战必过不了（缺 acw_tc 这类配套 cookie），说清楚
+  const envHint = diagStats.setCookieResponses
+    ? '［收到过 Set-Cookie］'
+    : '［本环境从未返回 Set-Cookie，反爬挑战拿不到配套 cookie］';
   throw new Error(
     '蓝奏云反爬校验重试超限' +
       challengeHint +
       '［已持有 cookie ' + ckNames.length + ' 个' +
       (ckNames.length ? '：' + ckNames.join(',') : '') +
-      '］'
+      '］' +
+      envHint
   );
 }
 
@@ -517,32 +535,47 @@ async function httpRequest(method, url, opts) {
  * 对 WAF 来说是不自然的客户端。现在默认也不带。
  */
 async function loginRequest(vars) {
-  const res = await httpRequest('POST', LOGIN_URL, {
-    referer: 'https://pc.woozooo.com',
-    form: {
-      task: '3',
-      uid: vars.account,
-      pwd: vars.password,
-      setSessionId: '',
-      setSig: '',
-      setScene: '',
-      setTocen: '',
-      formhash: '',
-    },
-  });
+  let lastErr = null;
+  for (let i = 0; i < LOGIN_URLS.length; i++) {
+    const url = LOGIN_URLS[i];
+    let res;
+    try {
+      res = await httpRequest('POST', url, {
+        referer: 'https://pc.woozooo.com',
+        form: {
+          task: '3',
+          uid: vars.account,
+          pwd: vars.password,
+          setSessionId: '',
+          setSig: '',
+          setScene: '',
+          setTocen: '',
+          formhash: '',
+        },
+      });
+    } catch (e) {
+      // 这个入口被反爬挡住 / 网络不通：换下一个入口，不要直接失败
+      lastErr = e;
+      console.warn('[蓝奏云] 登录入口不可用（' + url + '）：' + errText(e));
+      continue;
+    }
 
-  let data;
-  try {
-    data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
-  } catch (e) {
-    const peek = String(res.data == null ? '' : res.data).replace(/\s+/g, ' ').slice(0, 80);
-    throw new Error('登录失败：返回内容不是 JSON（' + (peek || '空响应') + '）');
+    let data;
+    try {
+      data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+    } catch (e) {
+      const peek = String(res.data == null ? '' : res.data).replace(/\s+/g, ' ').slice(0, 80);
+      lastErr = new Error('登录失败：返回内容不是 JSON（' + (peek || '空响应') + '）');
+      continue;
+    }
+    // 能解析出 zt 就说明这个入口是通的，账号密码不对就直接报，不必再换入口
+    if (!data || Number(data.zt) !== 1) {
+      const info = data && (data.info || data.inf);
+      throw new Error('登录失败：' + (info || '账号或密码不正确'));
+    }
+    return data;
   }
-  if (!data || Number(data.zt) !== 1) {
-    const info = data && (data.info || data.inf);
-    throw new Error('登录失败：' + (info || '账号或密码不正确'));
-  }
-  return data;
+  throw lastErr || new Error('登录失败：所有登录入口都不可用');
 }
 
 async function doLogin(vars) {
@@ -620,6 +653,7 @@ function parseCookieString(str) {
   s = s.replace(/\s+/g, '');
 
   const out = {};
+  let dupes = 0;
   s.split(';').forEach(function (kv) {
     if (!kv) return;
     const eq = kv.indexOf('=');
@@ -627,13 +661,29 @@ function parseCookieString(str) {
     const k = kv.slice(0, eq);
     const v = kv.slice(eq + 1);
     // cookie 名只允许这些字符，不符合的直接丢掉，免得拼出非法请求头
-    if (/^[A-Za-z0-9_.\-]+$/.test(k)) out[k] = v;
+    if (!/^[A-Za-z0-9_.\-]+$/.test(k)) return;
+    if (out[k] !== undefined) {
+      // 同名重复：取更长的那个。真实案例里粘进来的这段出现了一个被截短的
+      // phpdisk_info（只剩 7 个字符），按「后者覆盖」会把好值顶掉。
+      dupes++;
+      if (v.length <= out[k].length) return;
+    }
+    out[k] = v;
   });
+  if (dupes) console.warn('[蓝奏云] Cookie 里有 ' + dupes + ' 个重复项，已取较长的值');
   return out;
 }
 
 // 会话页探针：服务器到底认不认这份 cookie，看它返回的是登录后的页面还是登录页
 let lastProbe = '';
+
+/**
+ * 诊断计数。
+ * 反爬挑战能过，前提是服务端下发的 `acw_tc` 之类 cookie 能被读回来。
+ * 某些运行环境（部分 RN 版本）完全不暴露 Set-Cookie，那就永远过不了挑战——
+ * 这两个计数用来在报错时把这件事说清楚，而不是含糊地说「重试超限」。
+ */
+const diagStats = { setCookieResponses: 0, challenges: 0 };
 
 // 出问题时用来描述当前 Cookie 的样子（不泄露内容）
 function cookieSummary() {
@@ -1781,7 +1831,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）',
     artist: msg,
-    album: 'v0.0.15 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.16 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -2023,7 +2073,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.15',
+  version: '0.0.16',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
