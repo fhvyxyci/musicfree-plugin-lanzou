@@ -55,6 +55,16 @@ https://fhvyxyci.github.io/musicfree-plugin-lanzou/lanzou.js
 
 下载本仓库的 `lanzou.js`，在「插件管理 → 从本地安装」里选它。
 
+**方式三：订阅（和阿里云盘插件一起装）**
+
+桌面版「插件管理 → 订阅设置」里填下面这条，保存后点「更新订阅」，本插件和阿里云盘插件会一起装上、以后一起更新：
+
+```
+https://fhvyxyci.github.io/musicfree-plugins/plugins.json
+```
+
+订阅源仓库：https://github.com/fhvyxyci/musicfree-plugins
+
 > GitHub Pages 在国内访问不稳定，打不开的话见下面「访问不了 github.io 怎么办」。
 
 ## 配置变量
