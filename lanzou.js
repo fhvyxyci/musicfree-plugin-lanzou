@@ -435,9 +435,35 @@ function absorbCookies(res) {
 }
 
 // 统一的底层请求：自动处理 acw_sc__v2 挑战
+/**
+ * 预热 Cookie：有些网络环境下 WAF 会对每个域先发一次挑战，
+ * 先把该域根路径 GET 一遍，把能拿到的 cookie 都收进来，再重试原请求。
+ * 直接用裸 axios，避免和 httpRequest 相互递归。
+ */
+async function warmOrigin(targetUrl) {
+  try {
+    const m = String(targetUrl).match(/^(https?:\/\/[^/]+)/);
+    if (!m) return;
+    const res = await axios({
+      method: 'GET',
+      url: m[1] + '/',
+      headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
+      timeout: 4000,
+      validateStatus: function () {
+        return true;
+      },
+    });
+    absorbCookies(res);
+  } catch (e) {
+    // 预热失败不影响主流程
+  }
+}
+
 async function httpRequest(method, url, opts) {
   opts = opts || {};
   const MAX_CHALLENGE = 4;
+  let challengeHint = '';
+  let warmed = false;
   for (let attempt = 0; attempt < MAX_CHALLENGE; attempt++) {
     await pace();
     const headers = {
@@ -478,13 +504,31 @@ async function httpRequest(method, url, opts) {
     const text = typeof res.data === 'string' ? res.data : '';
     if (isAcwChallenge(text)) {
       const v = calcAcwScV2(text);
-      if (!v) throw new Error('蓝奏云反爬校验页解析失败');
+      const arg = String(text).match(/arg1='([^']*)'/);
+      const argLen = arg ? arg[1].length : 0;
+      challengeHint =
+        '［arg1 长度 ' + argLen + '］［算出 ' + (v ? v.slice(0, 6) + '…' : '空') + '］';
+      if (!v) {
+        throw new Error('蓝奏云反爬校验页解析失败' + challengeHint);
+      }
       session.cookies['acw_sc__v2'] = v;
+      // 第二次仍然被挑战：先把该域根路径预热一遍，补齐 acw_tc 之类的 cookie
+      if (attempt === 1 && !warmed) {
+        warmed = true;
+        await warmOrigin(url);
+      }
       continue; // 带上算出来的 cookie 再请求一次
     }
     return res;
   }
-  throw new Error('蓝奏云反爬校验重试超限');
+  const ckNames = Object.keys(session.cookies);
+  throw new Error(
+    '蓝奏云反爬校验重试超限' +
+      challengeHint +
+      '［已持有 cookie ' + ckNames.length + ' 个' +
+      (ckNames.length ? '：' + ckNames.join(',') : '') +
+      '］'
+  );
 }
 
 async function doLogin(vars) {
@@ -660,7 +704,11 @@ async function doupload(form, allowRelogin) {
   const url = API_BASE + '/doupload.php?uid=' + encodeURIComponent(s.uid) + '&vei=' + encodeURIComponent(s.vei);
 
   for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
-    const res = await httpRequest('POST', url, { form: form, referer: 'https://pc.woozooo.com' });
+    const res = await httpRequest('POST', url, {
+    form: form,
+    referer: MYDISK_URL,
+    headers: { Origin: 'https://pc.woozooo.com' },
+  });
     let data;
     try {
       data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
@@ -1634,7 +1682,7 @@ async function searchImpl(query, page, type) {
  * 用户截图就能定位，比一片空白有用。
  */
 function errorItem(stage, e) {
-  const msg = String((e && e.message) || e || '未知错误').replace(/\s+/g, ' ').slice(0, 100);
+  const msg = String((e && e.message) || e || '未知错误').replace(/\s+/g, ' ').slice(0, 160);
   // 把运行环境也带上：App 版本太旧同样会导致插件跑不起来
   let envInfo = '';
   try {
@@ -1648,7 +1696,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）：' + msg,
     artist: '把这一行发给插件作者',
-    album: 'v0.0.4 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.5 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -1890,7 +1938,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.4',
+  version: '0.0.5',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',

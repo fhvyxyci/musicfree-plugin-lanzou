@@ -81,7 +81,9 @@ https://fhvyxyci.github.io/musicfree-plugin-lanzou/lanzou.js
 
 1. 浏览器登录蓝奏云
 2. 按 F12 → Network → 点任意一个请求 → 找到请求头里的 `Cookie`
-3. 把里面 `phpdisk_info=...` 那一段（分号前）填到插件的「Cookie」变量里
+3. **把整条 Cookie 头的值都复制下来**填进插件的「Cookie」变量（不要只复制 `phpdisk_info` 那一段——浏览器手里还有 `acw_tc`、`acw_sc__v2` 等反爬用的 cookie，一起带上成功率更高）
+
+插件会自动从中取出 `phpdisk_info` 作为会话，其余 cookie 原样带上。
 
 ## 关于账号与会话
 
