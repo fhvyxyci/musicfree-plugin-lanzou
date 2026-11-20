@@ -66,6 +66,8 @@ https://fhvyxyci.github.io/musicfree-plugin-lanzou/lanzou.js
 | Cookie（可选） | 否 | 登录提示「无法保存会话」时改填这里，见下 |
 | 音乐目录 ID（可选） | 否 | 只扫某个目录时填它的 `folder_id`；留空表示整个网盘 |
 
+> 账号密码和 Cookie 二选一即可：填了 Cookie 就直接用 Cookie，不会再去登录。
+
 最小可用配置就是账号 + 密码。
 
 ### 怎么拿到「音乐目录 ID」

@@ -577,18 +577,10 @@ async function doLogin(vars) {
     );
   }
 
-  // 抓 uid / vei
-  const disk = await httpRequest('GET', MYDISK_URL);
-  const html = typeof disk.data === 'string' ? disk.data : '';
-  const uidMatch = html.match(/uid=([^'"&;\s]+)/);
-  const veiMatch = html.match(/vei['"]?\s*:\s*['"]([^'"]+)['"]/);
-  if (!uidMatch || !veiMatch) {
-    throw new Error('登录后未能从会话页解析出 uid / vei');
-  }
-  session.uid = uidMatch[1];
-  session.vei = veiMatch[1];
   session.loginAt = Date.now();
   session.ok = true;
+  // uid / vei 只是可选优化，拿不到不影响使用
+  await refreshUidVei();
 
   await storageSet(STORAGE_SESSION, {
     fp: configFingerprint(vars),
@@ -677,19 +669,38 @@ async function ensureSession(force) {
   }
 }
 
-// 用现有 Cookie 去会话页取 uid / vei，顺便验证 Cookie 是否还有效
+/**
+ * 从会话页解析 uid / vei。
+ *
+ * 这一步**只是优化**：实测只要带着会话 cookie，doupload.php 不带 uid/vei
+ * 也能正常返回。所以解析失败不再报错，免得把「页面结构变了 / 页面被风控拦了」
+ * 误判成「Cookie 失效」。
+ */
 async function refreshUidVei() {
   setStage('读取会话');
-  const disk = await httpRequest('GET', MYDISK_URL);
-  const html = typeof disk.data === 'string' ? disk.data : '';
-  const uidMatch = html.match(/uid=([^'"&;\s]+)/);
-  const veiMatch = html.match(/vei['"]?\s*:\s*['"]([^'"]+)['"]/);
-  if (!uidMatch || !veiMatch) {
-    throw new Error('Cookie 已失效，请重新登录蓝奏云后复制新的 Cookie');
+  try {
+    const disk = await httpRequest('GET', MYDISK_URL);
+    const html = typeof disk.data === 'string' ? disk.data : '';
+    if (!html) {
+      console.warn('[蓝奏云] 会话页返回的不是文本，跳过 uid/vei 解析');
+      return false;
+    }
+    const uidMatch = html.match(/uid=([^'"&;\s]+)/);
+    const veiMatch = html.match(/vei['"]?\s*:\s*['"]([^'"]+)['"]/);
+    if (!uidMatch || !veiMatch) {
+      const plain = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+      console.warn('[蓝奏云] 会话页未解析到 uid/vei（' + html.length + ' 字节）：' + plain);
+      return false;
+    }
+    session.uid = uidMatch[1];
+    session.vei = veiMatch[1];
+    return true;
+  } catch (e) {
+    console.warn('[蓝奏云] 会话页请求失败，跳过 uid/vei 解析：' + errText(e));
+    return false;
+  } finally {
+    session.loginAt = Date.now();
   }
-  session.uid = uidMatch[1];
-  session.vei = veiMatch[1];
-  session.loginAt = Date.now();
 }
 
 /* ============================ doupload 接口 ============================ */
@@ -699,16 +710,24 @@ async function refreshUidVei() {
  *   task=47 列文件夹、task=5 列文件（按 pg 翻页）、task=22 取文件分享信息
  * 返回体统一带 zt：1/2 成功，4 请求过频，9 会话过期。
  */
+function douploadUrl(s) {
+  // 实测：只要带着会话 cookie，uid/vei 都不是必需的。
+  // 能拿到就带上（与原实现一致），拿不到就不带，不要为了它去解析 HTML。
+  if (s.uid && s.vei) {
+    return API_BASE + '/doupload.php?uid=' + encodeURIComponent(s.uid) + '&vei=' + encodeURIComponent(s.vei);
+  }
+  return API_BASE + '/doupload.php';
+}
+
 async function doupload(form, allowRelogin) {
   const s = await ensureSession(false);
-  const url = API_BASE + '/doupload.php?uid=' + encodeURIComponent(s.uid) + '&vei=' + encodeURIComponent(s.vei);
 
   for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
-    const res = await httpRequest('POST', url, {
-    form: form,
-    referer: MYDISK_URL,
-    headers: { Origin: 'https://pc.woozooo.com' },
-  });
+    const res = await httpRequest('POST', douploadUrl(s), {
+      form: form,
+      referer: MYDISK_URL,
+      headers: { Origin: 'https://pc.woozooo.com' },
+    });
     let data;
     try {
       data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
@@ -724,8 +743,11 @@ async function doupload(form, allowRelogin) {
       if (allowRelogin === false) throw new Error('蓝奏云会话已过期，请重新登录');
       await ensureSession(true);
       const s2 = await ensureSession(false);
-      const url2 = API_BASE + '/doupload.php?uid=' + encodeURIComponent(s2.uid) + '&vei=' + encodeURIComponent(s2.vei);
-      const res2 = await httpRequest('POST', url2, { form: form, referer: 'https://pc.woozooo.com' });
+      const res2 = await httpRequest('POST', douploadUrl(s2), {
+        form: form,
+        referer: MYDISK_URL,
+        headers: { Origin: 'https://pc.woozooo.com' },
+      });
       try {
         const d2 = typeof res2.data === 'string' ? JSON.parse(res2.data) : res2.data;
         if (Number(d2.zt) === 1 || Number(d2.zt) === 2) return d2;
@@ -1696,7 +1718,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）：' + msg,
     artist: '把这一行发给插件作者',
-    album: 'v0.0.6 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.7 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -1938,7 +1960,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.6',
+  version: '0.0.7',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
