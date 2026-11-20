@@ -445,16 +445,29 @@ async function warmOrigin(targetUrl) {
   try {
     const m = String(targetUrl).match(/^(https?:\/\/[^/]+)/);
     if (!m) return;
-    const res = await axios({
-      method: 'GET',
-      url: m[1] + '/',
-      headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
-      timeout: 4000,
-      validateStatus: function () {
-        return true;
-      },
-    });
-    absorbCookies(res);
+    const origin = m[1] + '/';
+    // 根路径本身也可能返回挑战页：解掉它，把 acw_tc / acw_sc__v2 都拿到手，
+    // 后面的 POST 才有"已经过反爬"的身份
+    for (let i = 0; i < 3; i++) {
+      const headers = { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' };
+      const ck = cookieHeaderString();
+      if (ck) headers.Cookie = ck;
+      const res = await axios({
+        method: 'GET',
+        url: origin,
+        headers: headers,
+        timeout: 4000,
+        validateStatus: function () {
+          return true;
+        },
+      });
+      absorbCookies(res);
+      const text = typeof res.data === 'string' ? res.data : '';
+      if (!isAcwChallenge(text)) return;
+      const v = calcAcwScV2(text);
+      if (!v) return;
+      session.cookies['acw_sc__v2'] = v;
+    }
   } catch (e) {
     // 预热失败不影响主流程
   }
@@ -513,8 +526,8 @@ async function httpRequest(method, url, opts) {
         throw new Error('蓝奏云反爬校验页解析失败' + challengeHint);
       }
       session.cookies['acw_sc__v2'] = v;
-      // 第二次仍然被挑战：先把该域根路径预热一遍，补齐 acw_tc 之类的 cookie
-      if (attempt === 1 && !warmed) {
+      // 被挑战时把该域根路径预热一遍，补齐 acw_tc 之类的反爬 cookie
+      if (attempt >= 1 && !warmed) {
         warmed = true;
         await warmOrigin(url);
       }
@@ -1789,7 +1802,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）',
     artist: msg,
-    album: 'v0.0.12 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.13 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -2031,7 +2044,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.12',
+  version: '0.0.13',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
