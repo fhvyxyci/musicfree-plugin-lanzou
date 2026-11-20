@@ -532,6 +532,7 @@ async function httpRequest(method, url, opts) {
 }
 
 async function doLogin(vars) {
+  setStage('登录');
   runtimeStats.logins++;
   if (!vars.account || !vars.password) {
     throw new Error('未填写蓝奏云账号或密码');
@@ -628,7 +629,6 @@ function parseCookieString(str) {
  *   3. 都没有 -> 用账号密码登录；若用户填了 Cookie，则直接用 Cookie
  */
 async function ensureSession(force) {
-  setStage('登录');
   if (session.ok && !force) return session;
   if (loginPromise) return loginPromise;
   loginPromise = (async function () {
@@ -1696,7 +1696,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）：' + msg,
     artist: '把这一行发给插件作者',
-    album: 'v0.0.5 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.6 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -1938,7 +1938,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.5',
+  version: '0.0.6',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
