@@ -510,24 +510,13 @@ async function httpRequest(method, url, opts) {
   );
 }
 
-async function doLogin(vars) {
-  setStage('登录');
-  runtimeStats.logins++;
-  if (!vars.account || !vars.password) {
-    throw new Error('未填写蓝奏云账号或密码');
-  }
-  // 只清掉上一次的登录态，保留 WAF 侧的 cookie（acw_tc 等）。
-  // 之前整个清空，等于把反爬已经认可的身份也扔了，重新登录反而更容易被拦。
-  [
-    'phpdisk_info', 'ylogin', 'ylogins', 'lanzou_ifo', 'folder_id_c', 'uag',
-    'PHPSESSID', 'acw_sc__v2',
-  ].forEach(function (k) {
-    delete session.cookies[k];
-  });
-  // 自选一个 PHPSESSID：服务端会沿用客户端给的会话号，
-  // 这样即使运行环境读不到 Set-Cookie，至少会话号是可控的。
-  session.cookies['PHPSESSID'] = randomSessionId();
-
+/**
+ * 发一次登录请求，返回服务端 JSON。
+ * 注意：OpenList 登录时 `d.Cookie` 是空的——登录请求本身不带任何 cookie。
+ * 我们之前塞了一个自造的 PHPSESSID，等于"没访问过网站却带着会话号"，
+ * 对 WAF 来说是不自然的客户端。现在默认也不带。
+ */
+async function loginRequest(vars) {
   const res = await httpRequest('POST', LOGIN_URL, {
     referer: 'https://pc.woozooo.com',
     form: {
@@ -553,13 +542,38 @@ async function doLogin(vars) {
     const info = data && (data.info || data.inf);
     throw new Error('登录失败：' + (info || '账号或密码不正确'));
   }
+  return data;
+}
+
+async function doLogin(vars) {
+  setStage('登录');
+  runtimeStats.logins++;
+  if (!vars.account || !vars.password) {
+    throw new Error('未填写蓝奏云账号或密码');
+  }
+  // 只清掉上一次的登录态，保留 WAF 侧的 cookie（acw_tc 等）。
+  [
+    'phpdisk_info', 'ylogin', 'ylogins', 'lanzou_ifo', 'folder_id_c', 'uag',
+    'PHPSESSID',
+  ].forEach(function (k) {
+    delete session.cookies[k];
+  });
+
+  // 第一轮：与 OpenList 一致，不带任何 cookie
+  await loginRequest(vars);
+
+  // 少数环境读不到 Set-Cookie，那就用「自选会话号」的信封再试一次
+  if (!session.cookies['phpdisk_info']) {
+    session.cookies['PHPSESSID'] = randomSessionId();
+    await loginRequest(vars);
+  }
 
   // 关键：后续接口靠 phpdisk_info 这个 cookie 鉴权，拿不到就没法继续
   if (!session.cookies['phpdisk_info']) {
     throw new Error(
       '登录成功，但当前运行环境没有返回 Set-Cookie，无法保存会话。' +
         '请改用 Cookie 方式：在浏览器登录蓝奏云后按 F12 → Network → 任意请求 → ' +
-        '复制请求头里的 phpdisk_info=... 填到插件变量的「Cookie」里。'
+        '复制请求头里的 Cookie 整行填到插件变量的「Cookie」里。'
     );
   }
 
@@ -1767,7 +1781,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）',
     artist: msg,
-    album: 'v0.0.14 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.15 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -2009,7 +2023,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.14',
+  version: '0.0.15',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
