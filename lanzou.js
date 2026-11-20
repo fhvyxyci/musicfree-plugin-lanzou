@@ -631,12 +631,16 @@ function parseCookieString(str) {
   return out;
 }
 
+// 会话页探针：服务器到底认不认这份 cookie，看它返回的是登录后的页面还是登录页
+let lastProbe = '';
+
 // 出问题时用来描述当前 Cookie 的样子（不泄露内容）
 function cookieSummary() {
   const names = Object.keys(session.cookies);
   const pdi = session.cookies['phpdisk_info'] || '';
-  return '［Cookie ' + names.length + ' 项：' + (names.join(',') || '空') +
-    '；phpdisk_info ' + pdi.length + ' 字符］';
+  return '［Cookie ' + names.length + ' 项' +
+    '；phpdisk_info ' + pdi.length + ' 字符' +
+    '；' + (lastProbe || '未探测') + '］';
 }
 
 /**
@@ -707,20 +711,24 @@ async function refreshUidVei() {
     const disk = await httpRequest('GET', MYDISK_URL);
     const html = typeof disk.data === 'string' ? disk.data : '';
     if (!html) {
+      lastProbe = '会话页非文本';
       console.warn('[蓝奏云] 会话页返回的不是文本，跳过 uid/vei 解析');
       return false;
     }
     const uidMatch = html.match(/uid=([^'"&;\s]+)/);
     const veiMatch = html.match(/vei['"]?\s*:\s*['"]([^'"]+)['"]/);
     if (!uidMatch || !veiMatch) {
+      lastProbe = '会话页' + html.length + 'B/未登录';
       const plain = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
       console.warn('[蓝奏云] 会话页未解析到 uid/vei（' + html.length + ' 字节）：' + plain);
       return false;
     }
+    lastProbe = '会话页' + html.length + 'B/已登录';
     session.uid = uidMatch[1];
     session.vei = veiMatch[1];
     return true;
   } catch (e) {
+    lastProbe = '会话页请求失败';
     console.warn('[蓝奏云] 会话页请求失败，跳过 uid/vei 解析：' + errText(e));
     return false;
   } finally {
@@ -1745,7 +1753,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）：' + msg,
     artist: '把这一行发给插件作者',
-    album: 'v0.0.8 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.9 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -1987,7 +1995,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.8',
+  version: '0.0.9',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
