@@ -60,7 +60,7 @@ const UA =
 
 // 本地持久化键（musicfree/storage），都带插件前缀
 const STORAGE_SESSION = 'lanzou.session.v1';
-const STORAGE_INDEX = 'lanzou.index.v1';
+const STORAGE_INDEX = 'lanzou.index.v2';
 
 const ALL_SONGS_ID = '__ALL_SONGS__';
 const ALL_FOLDERS_TAG = '__ALL_FOLDERS__';
@@ -70,9 +70,9 @@ const FOLDER_PREFIX = 'folder:';
 const REQUEST_TIMEOUT = 8000;
 // 单次方法调用的总时间预算。沙箱整体限时 10 秒，这里留足余量：
 // 手机端冷启动要「登录 + 建索引」，不留余量就会整段超时，界面表现为「加载失败」。
-const METHOD_BUDGET_MS = 7000;
+const METHOD_BUDGET_MS = 9000;
 const CRAWL_BUDGET_MS = 4000; // 普通场景下一次调用用来爬索引的时间
-const CRAWL_BUDGET_FIRST_MS = 6500; // 索引还是空的时候多给一点
+const CRAWL_BUDGET_FIRST_MS = 5000; // 索引还是空的时候多给一点
 
 const PAGE_SIZE = 30; // 搜索结果每页
 const SHEET_PAGE_SIZE = 30; // 歌单 / 专辑每页
@@ -430,54 +430,23 @@ function absorbCookies(res) {
     if (eq <= 0) continue;
     const name = kv.slice(0, eq).trim();
     const value = kv.slice(eq + 1).trim();
-    if (name) session.cookies[name] = value;
+    // acw_sc__v2 是一次性的反爬校验值，不能沉淀到罐子里（OpenList 同样不保存）
+    if (name && name !== 'acw_sc__v2') session.cookies[name] = value;
   }
   return list.length;
 }
 
 // 统一的底层请求：自动处理 acw_sc__v2 挑战
-/**
- * 预热 Cookie：有些网络环境下 WAF 会对每个域先发一次挑战，
- * 先把该域根路径 GET 一遍，把能拿到的 cookie 都收进来，再重试原请求。
- * 直接用裸 axios，避免和 httpRequest 相互递归。
- */
-async function warmOrigin(targetUrl) {
-  try {
-    const m = String(targetUrl).match(/^(https?:\/\/[^/]+)/);
-    if (!m) return;
-    const origin = m[1] + '/';
-    // 根路径本身也可能返回挑战页：解掉它，把 acw_tc / acw_sc__v2 都拿到手，
-    // 后面的 POST 才有"已经过反爬"的身份
-    for (let i = 0; i < 3; i++) {
-      const headers = { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' };
-      const ck = cookieHeaderString();
-      if (ck) headers.Cookie = ck;
-      const res = await axios({
-        method: 'GET',
-        url: origin,
-        headers: headers,
-        timeout: 4000,
-        validateStatus: function () {
-          return true;
-        },
-      });
-      absorbCookies(res);
-      const text = typeof res.data === 'string' ? res.data : '';
-      if (!isAcwChallenge(text)) return;
-      const v = calcAcwScV2(text);
-      if (!v) return;
-      session.cookies['acw_sc__v2'] = v;
-    }
-  } catch (e) {
-    // 预热失败不影响主流程
-  }
-}
-
 async function httpRequest(method, url, opts) {
   opts = opts || {};
-  const MAX_CHALLENGE = 4;
+  const MAX_CHALLENGE = 3;
   let challengeHint = '';
-  let warmed = false;
+  /**
+   * 和 OpenList 的 `vs` 一样：反爬校验值只在「本次请求的重试」里用，用完就丢。
+   * 绝不能存进 cookie 罐子——那样会把 A 域名算出来的值发给 B 域名，
+   * WAF 会认为这是个一直在提交无效校验的客户端，于是永远回挑战页。
+   */
+  let acw = '';
   for (let attempt = 0; attempt < MAX_CHALLENGE; attempt++) {
     await pace();
     const headers = {
@@ -488,7 +457,8 @@ async function httpRequest(method, url, opts) {
     if (opts.headers) {
       for (const k in opts.headers) headers[k] = opts.headers[k];
     }
-    const ck = cookieHeaderString();
+    let ck = cookieHeaderString();
+    if (acw) ck = ck ? ck + '; acw_sc__v2=' + acw : 'acw_sc__v2=' + acw;
     if (ck) headers.Cookie = ck;
 
     let data;
@@ -525,13 +495,8 @@ async function httpRequest(method, url, opts) {
       if (!v) {
         throw new Error('蓝奏云反爬校验页解析失败' + challengeHint);
       }
-      session.cookies['acw_sc__v2'] = v;
-      // 被挑战时把该域根路径预热一遍，补齐 acw_tc 之类的反爬 cookie
-      if (attempt >= 1 && !warmed) {
-        warmed = true;
-        await warmOrigin(url);
-      }
-      continue; // 带上算出来的 cookie 再请求一次
+      acw = v;
+      continue; // 只带本次算出来的值重试，与 OpenList 一致
     }
     return res;
   }
@@ -997,7 +962,7 @@ async function loadIndex(fp, rootId) {
   if (cache.indexLoaded && cache.index && cache.index.fp === fp) return cache.index;
   cache.indexLoaded = true;
   const stored = await storageGet(STORAGE_INDEX);
-  if (stored && stored.fp === fp && stored.v === 1) {
+  if (stored && stored.fp === fp && stored.v === 2) {
     cache.index = {
       fp: fp,
       rootId: stored.rootId || String(rootId || '-1'),
@@ -1021,7 +986,7 @@ async function saveIndex() {
   const s = cache.index;
   if (!s) return;
   await storageSet(STORAGE_INDEX, {
-    v: 1,
+    v: 2,
     fp: s.fp,
     rootId: s.rootId || '-1',
     done: s.done,
@@ -1764,7 +1729,7 @@ async function searchImpl(query, page, type) {
     for (let guard = 0; guard < 12; guard++) {
       const left = remainingMs() - 600;
       if (left < 900) break;
-      state = await crawlStep(fp, Math.min(1800, left), rootId);
+      state = await crawlStep(fp, Math.min(2000, left), rootId);
       matched = matchSongs(state, q);
       if (matched.length || state.done) break;
     }
@@ -1802,7 +1767,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）',
     artist: msg,
-    album: 'v0.0.13 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.14 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -2044,7 +2009,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.13',
+  version: '0.0.14',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
