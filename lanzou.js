@@ -600,18 +600,43 @@ function randomSessionId() {
   return s;
 }
 
+/**
+ * 解析用户粘贴的 Cookie。
+ *
+ * 输入框里粘进来的东西什么样都有：带 "Cookie: " 前缀、被软换行截成两行、
+ * 首尾带引号、分号后没空格。cookie 名和值按 RFC 都不允许有空白字符，
+ * 所以这里直接把所有空白去掉，再按分号切——顺手修掉"粘贴被换行弄坏"的坑。
+ */
 function parseCookieString(str) {
+  let s = String(str == null ? '' : str).trim();
+  // 去掉可能带上的头名和引号
+  s = s.replace(/^(?:set-)?cookie\s*:\s*/i, '').trim();
+  if ((s.charAt(0) === '"' && s.charAt(s.length - 1) === '"') ||
+      (s.charAt(0) === "'" && s.charAt(s.length - 1) === "'")) {
+    s = s.slice(1, -1);
+  }
+  // 去掉所有空白（含粘贴进来的换行、制表符、空格）
+  s = s.replace(/\s+/g, '');
+
   const out = {};
-  String(str || '')
-    .split(/;\s*/)
-    .forEach(function (kv) {
-      const eq = kv.indexOf('=');
-      if (eq <= 0) return;
-      const k = kv.slice(0, eq).trim();
-      const v = kv.slice(eq + 1).trim();
-      if (k) out[k] = v;
-    });
+  s.split(';').forEach(function (kv) {
+    if (!kv) return;
+    const eq = kv.indexOf('=');
+    if (eq <= 0) return;
+    const k = kv.slice(0, eq);
+    const v = kv.slice(eq + 1);
+    // cookie 名只允许这些字符，不符合的直接丢掉，免得拼出非法请求头
+    if (/^[A-Za-z0-9_.\-]+$/.test(k)) out[k] = v;
+  });
   return out;
+}
+
+// 出问题时用来描述当前 Cookie 的样子（不泄露内容）
+function cookieSummary() {
+  const names = Object.keys(session.cookies);
+  const pdi = session.cookies['phpdisk_info'] || '';
+  return '［Cookie ' + names.length + ' 项：' + (names.join(',') || '空') +
+    '；phpdisk_info ' + pdi.length + ' 字符］';
 }
 
 /**
@@ -740,7 +765,9 @@ async function doupload(form, allowRelogin) {
 
     if (zt === 9) {
       // 会话过期：重登一次再试
-      if (allowRelogin === false) throw new Error('蓝奏云会话已过期，请重新登录');
+      if (allowRelogin === false) throw new Error('蓝奏云会话已过期，请重新登录' + cookieSummary());
+      // 我们算出来的挑战 cookie 可能是错的，留着会一直把请求搞脏，先丢掉
+      delete session.cookies['acw_sc__v2'];
       await ensureSession(true);
       const s2 = await ensureSession(false);
       const res2 = await httpRequest('POST', douploadUrl(s2), {
@@ -751,7 +778,7 @@ async function doupload(form, allowRelogin) {
       try {
         const d2 = typeof res2.data === 'string' ? JSON.parse(res2.data) : res2.data;
         if (Number(d2.zt) === 1 || Number(d2.zt) === 2) return d2;
-        throw new Error('蓝奏云接口错误：' + (d2.info || d2.zt));
+        throw new Error('蓝奏云接口错误：' + (d2.info || d2.zt) + cookieSummary());
       } catch (e) {
         if (e && e.message && e.message.indexOf('蓝奏云接口错误') === 0) throw e;
         throw new Error('蓝奏云会话已过期，且自动重登失败');
@@ -1718,7 +1745,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）：' + msg,
     artist: '把这一行发给插件作者',
-    album: 'v0.0.7 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.8 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -1960,7 +1987,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.7',
+  version: '0.0.8',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
@@ -1999,6 +2026,7 @@ module.exports = {
     calcAcwScV2: calcAcwScV2,
     parseSize: parseSize,
     extractSetCookies: extractSetCookies,
+    parseCookieString: parseCookieString,
     loginCount: function () {
       return runtimeStats.logins;
     },
