@@ -10,6 +10,10 @@
 https://fhvyxyci.github.io/musicfree-plugin-lanzou/lanzou.js
 ```
 
+**订阅源**（和阿里云盘插件一起装、一起更新；订阅源仓库里还放了[《用 AI 做同类网盘插件的提示词》](https://github.com/fhvyxyci/musicfree-plugins/blob/main/PROMPT.md)）
+
+<https://github.com/fhvyxyci/musicfree-plugins>
+
 ## 目录
 
 - [功能](#功能)
