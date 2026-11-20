@@ -91,7 +91,9 @@ https://fhvyxyci.github.io/musicfree-plugin-lanzou/lanzou.js
 
 ## 关于账号与会话
 
-蓝奏云没有 OAuth，也没有 refresh_token，它的「令牌」就是 `phpdisk_info` 这个会话 cookie（官方说法约 15 天有效）。所以这里做的是和刷新令牌等价的一套接力：
+蓝奏云没有 OAuth，也没有 refresh_token，它的「令牌」就是 `phpdisk_info` 这个会话 cookie（官方说法约 15 天有效）。
+
+> 这也是 [OpenList 官方文档](https://docs.oplist.org/zh/guide/drivers/lanzou.html)给出的结论：蓝奏云挂载有三种模式（账户 / cookie / 链接），**官方推荐「账户」**，因为「cookie 模式需要手动更换 cookie」。本插件默认就走账户模式——每次启动自动登录、会话过期（`zt=9`）自动重登，不需要你手动维护 cookie。Cookie 只是给「登录被风控」的环境留的备用通道。所以这里做的是和刷新令牌等价的一套接力：
 
 1. **运行期间**：会话存在模块内存里，同一次运行只登录一次
 2. **重启之后**：会话落到 `musicfree/storage`（桌面版可用；移动端没有这个模块，静默降级，最多表现为每次启动重新登录一次）

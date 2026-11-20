@@ -347,6 +347,7 @@ function syncVars() {
 
 const session = {
   ok: false,
+  source: '', // 'login' | 'cookie' | 'storage'
   cookies: {}, // name -> value
   uid: '',
   vei: '',
@@ -578,6 +579,7 @@ async function doLogin(vars) {
   }
 
   session.loginAt = Date.now();
+  session.source = 'login';
   session.ok = true;
   // uid / vei 只是可选优化，拿不到不影响使用
   await refreshUidVei();
@@ -665,6 +667,7 @@ async function ensureSession(force) {
         session.vei = stored.vei || '';
         session.shareHost = stored.shareHost || DEFAULT_SHARE_HOST;
         session.loginAt = stored.at || 0;
+        session.source = 'storage';
         session.ok = true;
         return session;
       }
@@ -684,6 +687,7 @@ async function ensureSession(force) {
         );
       }
       session.cookies = ck;
+      session.source = 'cookie';
       await refreshUidVei();
       session.ok = true;
       await storageSet(STORAGE_SESSION, {
@@ -784,7 +788,15 @@ async function doupload(form, allowRelogin) {
       if (allowRelogin === false) throw new Error('蓝奏云会话已过期，请重新登录' + cookieSummary());
       // 我们算出来的挑战 cookie 可能是错的，留着会一直把请求搞脏，先丢掉
       delete session.cookies['acw_sc__v2'];
-      await ensureSession(true);
+      const v2 = syncVars();
+      if (session.source !== 'login' && v2.account && v2.password) {
+        // 填了账号密码就真登录一次：OpenList 文档推荐的就是账户模式，
+        // 而且登录会在本机网络下重新拿会话，比复用一份别处粘来的 cookie 可靠
+        session.ok = false;
+        await doLogin(v2);
+      } else {
+        await ensureSession(true);
+      }
       const s2 = await ensureSession(false);
       const res2 = await httpRequest('POST', douploadUrl(s2), {
         form: form,
@@ -1762,7 +1774,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）',
     artist: msg,
-    album: 'v0.0.10 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.11 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -2004,7 +2016,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.10',
+  version: '0.0.11',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
