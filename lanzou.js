@@ -538,9 +538,16 @@ async function doLogin(vars) {
   if (!vars.account || !vars.password) {
     throw new Error('未填写蓝奏云账号或密码');
   }
+  // 只清掉上一次的登录态，保留 WAF 侧的 cookie（acw_tc 等）。
+  // 之前整个清空，等于把反爬已经认可的身份也扔了，重新登录反而更容易被拦。
+  [
+    'phpdisk_info', 'ylogin', 'ylogins', 'lanzou_ifo', 'folder_id_c', 'uag',
+    'PHPSESSID', 'acw_sc__v2',
+  ].forEach(function (k) {
+    delete session.cookies[k];
+  });
   // 自选一个 PHPSESSID：服务端会沿用客户端给的会话号，
   // 这样即使运行环境读不到 Set-Cookie，至少会话号是可控的。
-  session.cookies = {};
   session.cookies['PHPSESSID'] = randomSessionId();
 
   const res = await httpRequest('POST', LOGIN_URL, {
@@ -788,14 +795,22 @@ async function doupload(form, allowRelogin) {
       if (allowRelogin === false) throw new Error('蓝奏云会话已过期，请重新登录' + cookieSummary());
       // 我们算出来的挑战 cookie 可能是错的，留着会一直把请求搞脏，先丢掉
       delete session.cookies['acw_sc__v2'];
+      // 记下重登前的状态：会话页探针能说明服务器到底认不认这个会话
+      const preState = cookieSummary();
       const v2 = syncVars();
-      if (session.source !== 'login' && v2.account && v2.password) {
-        // 填了账号密码就真登录一次：OpenList 文档推荐的就是账户模式，
-        // 而且登录会在本机网络下重新拿会话，比复用一份别处粘来的 cookie 可靠
-        session.ok = false;
-        await doLogin(v2);
-      } else {
-        await ensureSession(true);
+      try {
+        if (session.source !== 'login' && v2.account && v2.password) {
+          // 填了账号密码就真登录一次：OpenList 文档推荐的就是账户模式，
+          // 而且登录会在本机网络下重新拿会话，比复用一份别处粘来的 cookie 可靠
+          session.ok = false;
+          await doLogin(v2);
+        } else {
+          await ensureSession(true);
+        }
+      } catch (e2) {
+        throw new Error(
+          '会话被服务器拒绝，重新登录也没成功：' + errText(e2) + '｜重登前：' + preState
+        );
       }
       const s2 = await ensureSession(false);
       const res2 = await httpRequest('POST', douploadUrl(s2), {
@@ -1774,7 +1789,7 @@ function errorItem(stage, e) {
     id: '__diag__',
     title: '蓝奏云出错（' + stage + '）',
     artist: msg,
-    album: 'v0.0.11 · ' + (envInfo || '环境未知'),
+    album: 'v0.0.12 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -2016,7 +2031,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.11',
+  version: '0.0.12',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
