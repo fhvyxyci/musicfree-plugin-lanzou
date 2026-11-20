@@ -675,6 +675,14 @@ async function ensureSession(force) {
       if (!ck['phpdisk_info']) {
         throw new Error('Cookie 里没有 phpdisk_info，请复制完整的那一段（含 phpdisk_info=...）');
       }
+      // 正常长度约 200 个字符；太短说明粘贴被截断（只复制了前半段，或从会省略长值的界面复制）
+      if (ck['phpdisk_info'].length < 60) {
+        throw new Error(
+          'Cookie 被截断了：phpdisk_info 只有 ' + ck['phpdisk_info'].length +
+            ' 个字符（正常约 200 个）。请重新完整复制：浏览器 F12 → Network → 点任意请求 → ' +
+            'Request Headers 里的 Cookie 整行；或用「账号 + 密码」方式，不需要粘贴'
+        );
+      }
       session.cookies = ck;
       await refreshUidVei();
       session.ok = true;
@@ -1750,10 +1758,11 @@ function errorItem(stage, e) {
     envInfo = '';
   }
   return {
+    // 手机版歌曲名不能长按复制，所以详情放「歌手」这一栏
     id: '__diag__',
-    title: '蓝奏云出错（' + stage + '）：' + msg,
-    artist: '把这一行发给插件作者',
-    album: 'v0.0.9 · ' + (envInfo || '环境未知'),
+    title: '蓝奏云出错（' + stage + '）',
+    artist: msg,
+    album: 'v0.0.10 · ' + (envInfo || '环境未知'),
   };
 }
 
@@ -1995,7 +2004,7 @@ async function getLyric(musicItem) {
 
 module.exports = {
   platform: '蓝奏云',
-  version: '0.0.9',
+  version: '0.0.10',
   author: 'fhvyxyci',
   description: '蓝奏云网盘音乐插件：全盘搜索、按文件夹当歌单/专辑、全部歌曲榜单、同名 lrc 歌词、内嵌标签',
   cacheControl: 'no-cache',
